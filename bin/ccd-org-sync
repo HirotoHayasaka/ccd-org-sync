@@ -114,6 +114,23 @@ def snapshot(msg):
 
 
 # ---------- sync ----------
+def okey(org):
+    return f"{org.parent.name}/{org.name}"
+
+
+def load_seen(all_orgs, sessions):
+    """{ "<account>/<org>": [その org に一度でも存在した sessionId] } を返す。"""
+    if not STATE.exists():
+        return {}
+    data = json.loads(STATE.read_text())
+    if isinstance(data, dict):
+        return data
+    # 旧形式（全 org 共通のリスト）からの移行: セッションが入っている既存 org にだけ割り当てる
+    old = set(data)
+    return {okey(o): sorted(old) for o in all_orgs
+            if any(org_ == o for by in sessions.values() for org_ in by)}
+
+
 def plan():
     all_orgs = orgs()
     sessions = {}  # sid -> {org: info}
@@ -122,7 +139,7 @@ def plan():
             info = load_session(f)
             if info:
                 sessions.setdefault(f.stem, {})[org] = info
-    known = set(json.loads(STATE.read_text())) if STATE.exists() else set()
+    seen = load_seen(all_orgs, sessions)
 
     writes, skipped_deleted, archived = [], [], {}
     for sid, by_org in sessions.items():
@@ -131,7 +148,7 @@ def plan():
         for org in all_orgs:
             cur = by_org.get(org)
             if cur is None:
-                if sid in known:  # 同期済みなのに消えている = その org で削除された
+                if sid in seen.get(okey(org), ()):  # この org に一度あったのに消えている = 削除された
                     skipped_deleted.append((sid, org))
                     continue
                 writes.append(("NEW", org / f"{sid}.json", winner))
@@ -185,12 +202,12 @@ def sync(dry, notify):
             atomic_write(p, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(), mtime=mt)
         snapshot(f"sync: {summary}")
 
-    # 全 org に揃った ID を「同期済み」として記録（削除検知用）
-    present_all = {sid for sid, by in sessions.items()} | {w[1].stem for w in writes}
-    in_every = {sid for sid in present_all
-                if all((o / f"{sid}.json").exists() for o in all_orgs)}
-    known = set(json.loads(STATE.read_text())) if STATE.exists() else set()
-    STATE.write_text(json.dumps(sorted(known | in_every)))
+    # org ごとに「一度でも存在した ID」を記録（削除検知用）。新しい org は空から始まる
+    seen = load_seen(all_orgs, sessions)
+    for org in all_orgs:
+        now = {f.stem for f in org.glob("local_*.json")}
+        seen[okey(org)] = sorted(set(seen.get(okey(org), [])) | now)
+    STATE.write_text(json.dumps(seen, indent=0))
 
     if changed and notify:
         subprocess.run(["/usr/bin/osascript", "-e",

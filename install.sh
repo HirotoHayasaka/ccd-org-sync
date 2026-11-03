@@ -19,11 +19,11 @@ case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "NOTE: $BIN_DIR を PATH に追加�
 [ "${1:-}" = "--no-agent" ] && exit 0
 [ -d "$CCS" ] || { echo "ERROR: $CCS がありません（Claude Desktop を一度起動してください）"; exit 1; }
 
-# 監視対象: アカウントフォルダと org フォルダ（新しい org は 5 分ごとの定期実行で拾う）
+# 監視対象: claude-code-sessions 自体（新しいアカウント）・アカウント（新しい org）・org フォルダ
 watch=""
 while IFS= read -r d; do
   watch+="    <string>$d</string>"$'\n'
-done < <(find "$CCS" -mindepth 1 -maxdepth 2 -type d | sort)
+done < <(find "$CCS" -mindepth 0 -maxdepth 2 -type d | sort)
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 mkdir -p "$(dirname "$PLIST")"
