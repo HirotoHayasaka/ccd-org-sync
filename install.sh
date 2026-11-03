@@ -11,6 +11,10 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 CCS="$HOME/Library/Application Support/Claude/claude-code-sessions"
 LOG="$HOME/Library/Logs/ccd-org-sync.log"
 
+[ "$(uname)" = "Darwin" ] || { echo "ERROR: macOS 専用です / macOS only"; exit 1; }
+[ -x /usr/bin/python3 ] || { echo "ERROR: /usr/bin/python3 がありません。xcode-select --install を実行してください"; exit 1; }
+command -v git >/dev/null || { echo "ERROR: git がありません / git is required"; exit 1; }
+
 mkdir -p "$BIN_DIR"
 install -m 755 bin/ccd-org-sync "$BIN_DIR/ccd-org-sync"
 echo "installed: $BIN_DIR/ccd-org-sync"

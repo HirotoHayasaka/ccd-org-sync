@@ -1,92 +1,83 @@
 # ccd-org-sync
 
-Claude Desktop（macOS）で **org を切り替えるとサイドバーのセッション一覧が別々になる**問題を解消するツール。
-org 間で一覧を双方向に同期し、**アーカイブ状態も揃える**。
+English | [日本語](README.ja.md)
 
-[jeremy9682/ccd-session-sync](https://github.com/jeremy9682/ccd-session-sync) の考え方を、
-「同一アカウント内の複数 org」向けに作り直したもの（元ツールは別アカウント間専用で、同じアカウント内の org 同士は対象外）。
+Keep the **Claude Desktop** (macOS) Claude Code sidebar identical across **organizations and accounts** — including archive state.
 
-## 背景
+Inspired by [jeremy9682/ccd-session-sync](https://github.com/jeremy9682/ccd-session-sync), which syncs between *different accounts*. This tool also handles **multiple orgs inside the same account** (which `ccd-session-sync` refuses), and any number of accounts/orgs at once.
 
-Desktop のサイドバー一覧は org ごとに分かれて保存されている。
+> Unofficial. Not affiliated with or endorsed by Anthropic. It edits Claude Desktop's internal, undocumented files — an app update may break it. Use at your own risk.
+
+## The problem
+
+Claude Desktop stores the sidebar session list per org:
 
 ```
 ~/Library/Application Support/Claude/claude-code-sessions/<accountUUID>/<orgUUID>/
-├── local_<id>.json        # 1 セッション = 1 ファイル（一覧に出るデータ）
-└── archived-sessions.idx  # アーカイブ済みセッションの ID 一覧
+├── local_<id>.json        # one sidebar entry per session
+└── archived-sessions.idx  # IDs of archived sessions
 ```
 
-会話本体は org に関係なく `~/.claude/projects/**/*.jsonl` にあるので、一覧のファイルを他の org にコピーすれば両方に表示される。
-公式の対応はない（[#48511](https://github.com/anthropics/claude-code/issues/48511) は not planned、[#74662](https://github.com/anthropics/claude-code/issues/74662) はオープン）。
+Switch org or account and the sidebar looks empty — but the conversations themselves live in `~/.claude/projects/**/*.jsonl`, shared by every org. Copying the small index files is enough to show the same list everywhere.
 
-## 同期のルール
+There is no official setting for this ([#48511](https://github.com/anthropics/claude-code/issues/48511) closed as not planned, [#74662](https://github.com/anthropics/claude-code/issues/74662) open).
 
-| 操作 | もう一方の org で起きること |
+## What it syncs
+
+| You do this in one org | Other orgs get |
 |---|---|
-| 新しいセッションを作る | 一覧に追加される |
-| アーカイブ／アーカイブ解除 | 同じ状態になる（`isArchived` と `archived-sessions.idx` の両方を揃える） |
-| 会話が進んで内容が更新される | 更新日時が新しい方に揃う（newer-wins） |
-| セッションを削除する | 削除はされない。ただし消した側に復活もしない |
+| Create a session | The session appears |
+| Archive / unarchive | Same archive state (`isArchived` and `archived-sessions.idx`) |
+| Keep chatting (entry updated) | Newest version wins (by file mtime) |
+| Delete a session | Not deleted elsewhere — but never resurrected in the org you deleted it from |
 
-### CLI から `/desktop` で移したセッションの名前
+Plus: sessions moved from the CLI with `/desktop` without a name show up as "General task". ccd-org-sync fills in the empty title from the CLI transcript: `/rename` name → AI title → first prompt (40 chars).
 
-CLI で名前を付けずに `/desktop` で移すと、タイトルが空のまま登録され「General task」と表示される。
-タイトルが空のセッションを見つけたら、CLI の会話ファイル（`~/.claude/projects/*/<cliSessionId>.jsonl`）から次の順で名前を付ける。
+Safety:
 
-1. `/rename` で付けた名前
-2. AI が付けたタイトル（あれば）
-3. 最初の発言の冒頭 40 文字（`[Image #1]` などの印は除く）
+- Atomic writes (temp file + rename) — Desktop never reads a half-written file
+- Every change is snapshotted to a local git repo (`~/.ccd-org-sync/git`); `undo` reverts the last sync
+- Never touches transcripts or credentials
+- Newly appearing orgs start empty and receive everything; deletion tracking is per org
 
-Desktop の起動中は、アプリが空のタイトルで書き戻すことがある。その場合も次の同期で付け直され、再起動後に表示される。
+## Install
 
-- 1 回同期したセッション ID を `~/.ccd-org-sync/synced-ids.json` に記録し、削除されたものを復活させないようにしている
-- 3 つ以上の org、複数アカウントの org にも対応（見つかった org すべてを同期する）
-- 書き込みは一時ファイル → rename で行い、書きかけのファイルを Desktop が読むことはない
-- 変更前後を `~/.ccd-org-sync/git` にコミット。`undo` で直前の同期を戻せる
-- 会話本体・認証情報には触らない
-
-## インストール
+Requirements: macOS, `/usr/bin/python3` (Xcode Command Line Tools), `git`. Standard library only.
 
 ```bash
 git clone https://github.com/HirotoHayasaka/ccd-org-sync
 cd ccd-org-sync
-./install.sh            # ~/.local/bin に配置 + launchd で自動実行
-./install.sh --no-agent # 手動実行だけ
+./install.sh            # installs to ~/.local/bin and registers a launchd agent
+./install.sh --no-agent # script only, run manually
 ```
 
-自動実行は、org フォルダに変化があったとき（最短 20 秒間隔）と 5 分ごと。変更があったときだけ macOS 通知が出る。
-org を追加したら `./install.sh` をもう一度実行すると、新しい org もフォルダ監視の対象に入る。
+The agent runs when the session folders change (at most every 20 s) and every 5 minutes, and posts a macOS notification only when something changed. Re-run `./install.sh` after adding an org/account to watch it immediately (the 5‑minute run picks it up anyway).
 
-必要なもの: macOS、`/usr/bin/python3`、`git`
-
-## 使い方
+## Usage
 
 ```bash
-ccd-org-sync status     # org ごとの件数・アーカイブ数
-ccd-org-sync --dry-run  # 書き込まずに変更内容だけ表示
-ccd-org-sync            # 同期を実行
-ccd-org-sync log        # 同期履歴
-ccd-org-sync undo       # 直前の同期を戻す（Desktop を終了してから）
+ccd-org-sync status     # entries / archived per org
+ccd-org-sync --dry-run  # show what would change, write nothing
+ccd-org-sync            # sync now
+ccd-org-sync log        # sync history
+ccd-org-sync undo       # revert the last sync (quit Desktop first)
 ```
 
-もう一方の org で変わった内容は、Desktop の再起動（または org の切り替え）で反映される。
+Changes from other orgs appear after restarting Claude Desktop (it reads the list at startup). Log: `~/Library/Logs/ccd-org-sync.log`. CLI messages are in Japanese.
 
-ログ: `~/Library/Logs/ccd-org-sync.log`
-
-## アンインストール
+## Uninstall
 
 ```bash
-./uninstall.sh          # エージェントとスクリプトを削除（履歴は残す）
-./uninstall.sh --purge  # 履歴 ~/.ccd-org-sync も削除
+./uninstall.sh          # remove agent and script, keep history
+./uninstall.sh --purge  # also delete ~/.ccd-org-sync
 ```
 
-## 注意
+## Known limitations
 
-- Desktop の**非公開の内部ファイル**を書き換える。アプリの更新で動かなくなる可能性がある
-- Desktop の起動中は、アプリがメモリ上の古い状態でファイルを書き戻すことがある。アーカイブが戻ってしまったら `log` / `undo` で確認する
-- セッションに含まれる MCP コネクタの設定は org 固有のものもあるが、そのままコピーしている
-- `~/.ccd-org-sync/` にはセッションのタイトルや org の ID が入るので、共有しないこと
-- Anthropic とは無関係の非公式ツール
+- While Desktop is running it may write back its in-memory state (e.g. undo an archive or blank a title). The next sync / restart usually settles it; check `log` and `undo` if not.
+- Org-specific MCP connector settings inside an entry are copied as-is.
+- `~/.ccd-org-sync/` contains session titles and account/org IDs. Don't share it.
+- macOS only (launchd, osascript).
 
 ## License
 
