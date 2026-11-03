@@ -49,17 +49,26 @@ Desktop の起動中は、アプリが空のタイトルで書き戻すことが
 
 ## インストール
 
+必要なもの: macOS、`/usr/bin/python3`（Xcode Command Line Tools）、`git`
+
+### Homebrew
+
+```bash
+brew install hirotohayasaka/tap/ccd-org-sync
+ccd-org-sync agent install   # 自動実行（launchd）を登録
+```
+
+### ソースから
+
 ```bash
 git clone https://github.com/HirotoHayasaka/ccd-org-sync
 cd ccd-org-sync
-./install.sh            # ~/.local/bin に配置 + launchd で自動実行
+./install.sh            # ~/.local/bin に配置 + 自動実行を登録
 ./install.sh --no-agent # 手動実行だけ
 ```
 
 自動実行は、org フォルダに変化があったとき（最短 20 秒間隔）と 5 分ごと。変更があったときだけ macOS 通知が出る。
-org を追加したら `./install.sh` をもう一度実行すると、新しい org もフォルダ監視の対象に入る。
-
-必要なもの: macOS、`/usr/bin/python3`、`git`
+org やアカウントを追加したら `ccd-org-sync agent install` をもう一度実行すると、すぐ監視対象に入る（5 分ごとの実行でも拾われる）。
 
 ## 使い方
 
@@ -69,6 +78,7 @@ ccd-org-sync --dry-run  # 書き込まずに変更内容だけ表示
 ccd-org-sync            # 同期を実行
 ccd-org-sync log        # 同期履歴
 ccd-org-sync undo       # 直前の同期を戻す（Desktop を終了してから）
+ccd-org-sync agent install|uninstall|status   # 自動実行の登録・解除・状態
 ```
 
 もう一方の org で変わった内容は、Desktop の再起動（または org の切り替え）で反映される。
@@ -78,7 +88,11 @@ ccd-org-sync undo       # 直前の同期を戻す（Desktop を終了してか�
 ## アンインストール
 
 ```bash
-./uninstall.sh          # エージェントとスクリプトを削除（履歴は残す）
+# Homebrew
+ccd-org-sync agent uninstall && brew uninstall ccd-org-sync
+
+# ソースから
+./uninstall.sh          # 自動実行とスクリプトを削除（履歴は残す）
 ./uninstall.sh --purge  # 履歴 ~/.ccd-org-sync も削除
 ```
 

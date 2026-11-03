@@ -16,10 +16,15 @@
   ccd-org-sync log          同期履歴
   ccd-org-sync undo         直前の同期を元に戻す（Desktop を終了してから推奨）
   ccd-org-sync --notify     変更があれば macOS 通知（launchd 用）
+  ccd-org-sync agent install    自動実行（launchd）を登録。org/アカウント追加後も再実行
+  ccd-org-sync agent uninstall  自動実行を解除
+  ccd-org-sync agent status     自動実行の状態
+  ccd-org-sync --version
 """
 import json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
+__version__ = "0.1.0"
 HOME = Path.home()
 CCS = Path(os.environ.get("CCD_SESSIONS_DIR",
                           HOME / "Library/Application Support/Claude/claude-code-sessions"))
@@ -308,9 +313,80 @@ def undo():
     log("完了。Claude Desktop を再起動してください")
 
 
+# ---------- launchd エージェント ----------
+LABEL = "com.ccd-org-sync"
+PLIST = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
+LOG_FILE = HOME / "Library/Logs/ccd-org-sync.log"
+LEGACY_LABELS = ["com.hayasaka.ccd-org-sync"]
+
+
+def _self_path():
+    # Homebrew では Cellar のバージョン付きパスではなく、更新後も変わらない bin のリンクを使う
+    found = shutil.which("ccd-org-sync")
+    return found or str(Path(sys.argv[0]).absolute())
+
+
+def _launchctl(*args):
+    return subprocess.run(["/bin/launchctl", *args], capture_output=True, text=True)
+
+
+def agent(sub):
+    import plistlib
+    domain = f"gui/{os.getuid()}"
+    if sub == "install":
+        if not CCS.is_dir():
+            sys.exit(f"ERROR: {CCS} がありません（Claude Desktop を一度起動してください）")
+        # 監視対象: claude-code-sessions 自体（新しいアカウント）・アカウント（新しい org）・各 org
+        watch = [str(CCS)] + sorted(str(p) for p in CCS.glob("*") if p.is_dir()) \
+                + sorted(str(p) for p in CCS.glob("*/*") if p.is_dir())
+        for old in LEGACY_LABELS + [LABEL]:
+            _launchctl("bootout", f"{domain}/{old}")
+        for old in LEGACY_LABELS:
+            (HOME / "Library/LaunchAgents" / f"{old}.plist").unlink(missing_ok=True)
+        PLIST.parent.mkdir(parents=True, exist_ok=True)
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(PLIST, "wb") as fh:
+            plistlib.dump({
+                "Label": LABEL,
+                "ProgramArguments": [_self_path(), "--notify"],
+                "WatchPaths": watch,
+                "StartInterval": 300,
+                "ThrottleInterval": 20,
+                "RunAtLoad": True,
+                "StandardOutPath": str(LOG_FILE),
+                "StandardErrorPath": str(LOG_FILE),
+            }, fh)
+        r = _launchctl("bootstrap", domain, str(PLIST))
+        if r.returncode != 0:
+            sys.exit(f"ERROR: launchctl bootstrap に失敗: {r.stderr.strip()}")
+        print(f"自動実行を登録しました（{len(watch)} フォルダを監視）: {PLIST}")
+        print("org やアカウントを追加したら、もう一度 `ccd-org-sync agent install` を実行してください")
+    elif sub == "uninstall":
+        _launchctl("bootout", f"{domain}/{LABEL}")
+        PLIST.unlink(missing_ok=True)
+        print("自動実行を解除しました")
+    elif sub == "status":
+        r = _launchctl("print", f"{domain}/{LABEL}")
+        if r.returncode != 0:
+            return print("自動実行: 未登録（`ccd-org-sync agent install` で登録）")
+        state = re.search(r"^\s*state = (.+)$", r.stdout, re.M)
+        runs = re.search(r"^\s*runs = (\d+)$", r.stdout, re.M)
+        print(f"自動実行: 登録済み / state={state.group(1) if state else '?'} / "
+              f"runs={runs.group(1) if runs else '?'} / log={LOG_FILE}")
+    else:
+        sys.exit("使い方: ccd-org-sync agent install|uninstall|status")
+
+
 def main():
     args = sys.argv[1:]
+    if "--version" in args:
+        return print(f"ccd-org-sync {__version__}")
+    if "-h" in args or "--help" in args:
+        return print(__doc__)
     cmd = next((a for a in args if not a.startswith("-")), "sync")
+    if cmd == "agent":
+        rest = [a for a in args if not a.startswith("-")]
+        return agent(rest[1] if len(rest) > 1 else "")
     if cmd == "status":
         return status()
     if cmd == "log":

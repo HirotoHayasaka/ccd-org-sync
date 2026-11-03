@@ -44,14 +44,23 @@ Safety:
 
 Requirements: macOS, `/usr/bin/python3` (Xcode Command Line Tools), `git`. Standard library only.
 
+### Homebrew
+
+```bash
+brew install hirotohayasaka/tap/ccd-org-sync
+ccd-org-sync agent install   # register the launchd agent (auto sync)
+```
+
+### From source
+
 ```bash
 git clone https://github.com/HirotoHayasaka/ccd-org-sync
 cd ccd-org-sync
-./install.sh            # installs to ~/.local/bin and registers a launchd agent
+./install.sh            # installs to ~/.local/bin and registers the launchd agent
 ./install.sh --no-agent # script only, run manually
 ```
 
-The agent runs when the session folders change (at most every 20 s) and every 5 minutes, and posts a macOS notification only when something changed. Re-run `./install.sh` after adding an org/account to watch it immediately (the 5‑minute run picks it up anyway).
+The agent runs when the session folders change (at most every 20 s) and every 5 minutes, and posts a macOS notification only when something changed. Re-run `ccd-org-sync agent install` after adding an org/account to watch it immediately (the 5‑minute run picks it up anyway).
 
 ## Usage
 
@@ -61,6 +70,7 @@ ccd-org-sync --dry-run  # show what would change, write nothing
 ccd-org-sync            # sync now
 ccd-org-sync log        # sync history
 ccd-org-sync undo       # revert the last sync (quit Desktop first)
+ccd-org-sync agent install|uninstall|status
 ```
 
 Changes from other orgs appear after restarting Claude Desktop (it reads the list at startup). Log: `~/Library/Logs/ccd-org-sync.log`. CLI messages are in Japanese.
@@ -68,6 +78,10 @@ Changes from other orgs appear after restarting Claude Desktop (it reads the lis
 ## Uninstall
 
 ```bash
+# Homebrew
+ccd-org-sync agent uninstall && brew uninstall ccd-org-sync
+
+# From source
 ./uninstall.sh          # remove agent and script, keep history
 ./uninstall.sh --purge  # also delete ~/.ccd-org-sync
 ```
