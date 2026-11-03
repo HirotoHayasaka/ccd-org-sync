@@ -17,7 +17,7 @@
   ccd-org-sync undo         直前の同期を元に戻す（Desktop を終了してから推奨）
   ccd-org-sync --notify     変更があれば macOS 通知（launchd 用）
 """
-import json, os, shutil, subprocess, sys, tempfile, time
+import json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 HOME = Path.home()
@@ -113,6 +113,55 @@ def snapshot(msg):
     return False
 
 
+# ---------- タイトル補完 ----------
+PROJECTS = Path(os.environ.get("CLAUDE_PROJECTS_DIR", HOME / ".claude/projects"))
+TITLE_LEN = 40
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # tool_result だけの発言は対象外
+        return " ".join(c.get("text", "") for c in content
+                        if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+
+def derive_title(cli_id):
+    """CLI の会話ファイルから名前を作る。/rename の名前 → AI タイトル → 最初の発言 の順。"""
+    if not cli_id or "/" in cli_id:
+        return None
+    files = list(PROJECTS.glob(f"*/{cli_id}.jsonl"))
+    if not files:
+        return None
+    custom = ai = first = None
+    try:
+        with open(files[0], encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"custom-title"' not in line and '"ai-title"' not in line and \
+                        (first or '"user"' not in line):
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                t = d.get("type")
+                if t == "custom-title" and d.get("customTitle"):
+                    custom = d["customTitle"]
+                elif t == "ai-title" and d.get("aiTitle"):
+                    ai = d["aiTitle"]
+                elif t == "user" and not first and not d.get("isMeta"):
+                    s = re.sub(r"\[(Image|Pasted text) #\d+[^\]]*\]", " ",
+                               _text(d.get("message", {}).get("content")))
+                    s = " ".join(s.split())
+                    if s and not s.startswith("<"):  # コマンドやシステム挿入は飛ばす
+                        first = s
+    except OSError:
+        return None
+    title = custom or ai or first
+    return title[:TITLE_LEN] if title else None
+
+
 # ---------- sync ----------
 def okey(org):
     return f"{org.parent.name}/{org.name}"
@@ -141,9 +190,16 @@ def plan():
                 sessions.setdefault(f.stem, {})[org] = info
     seen = load_seen(all_orgs, sessions)
 
-    writes, skipped_deleted, archived = [], [], {}
+    writes, skipped_deleted, archived, titled = [], [], {}, []
     for sid, by_org in sessions.items():
         winner = max(by_org.values(), key=lambda i: i["mtime"])
+        if not winner["data"].get("title"):
+            t = derive_title(winner["data"].get("cliSessionId"))
+            if t:
+                data = dict(winner["data"], title=t, titleSource="auto")
+                winner = dict(winner, data=data,
+                              raw=json.dumps(data, ensure_ascii=False).encode())
+                titled.append((sid, t))
         archived[sid] = bool(winner["data"].get("isArchived"))
         for org in all_orgs:
             cur = by_org.get(org)
@@ -169,14 +225,16 @@ def plan():
             body = dict(idx or {"v": 1})
             body["archived"] = new
             idx_writes.append((org, body, set(new) - set(cur), set(cur) - set(new)))
-    return all_orgs, sessions, writes, idx_writes, skipped_deleted
+    return all_orgs, sessions, writes, idx_writes, skipped_deleted, titled
 
 
 def sync(dry, notify):
     if len(orgs()) < 2:
         log("org が1つしかないので何もしません")
         return
-    all_orgs, sessions, writes, idx_writes, skipped = plan()
+    all_orgs, sessions, writes, idx_writes, skipped, titled = plan()
+    for sid, t in titled:
+        log(f"TITLE {sid[6:14]} → {t}")
 
     for kind, path, w in writes:
         log(f"{kind} {label(path.parent)} {path.stem[6:14]} "
