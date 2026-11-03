@@ -221,7 +221,8 @@ def status():
         idx = load_idx(org)
         print(f"{label(org)}  一覧 {len(fs):>3} 件 / アーカイブ {len(idx['archived']) if idx else 0:>3} 件")
     if (GIT / ".git").exists():
-        print(git("log", "-1", "--format=最終同期: %ci %s").stdout.strip())
+        # 初回同期の途中は git init 済みでもコミットが無く git log が 128 で落ちる
+        print(git("log", "-1", "--format=最終同期: %ci %s", check=False).stdout.strip())
 
 
 def undo():
@@ -256,7 +257,7 @@ def main():
         return status()
     if cmd == "log":
         git_init()
-        return print(git("log", "--format=%ci  %s").stdout)
+        return print(git("log", "--format=%ci  %s", check=False).stdout)
     BASE.mkdir(parents=True, exist_ok=True)
     try:
         LOCK.mkdir()
