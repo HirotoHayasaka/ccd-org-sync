@@ -1,0 +1,264 @@
+#!/usr/bin/python3 -I
+"""ccd-org-sync — Claude Desktop のサイドバー一覧（local_*.json）を org 間で双方向同期する。
+
+  ~/Library/Application Support/Claude/claude-code-sessions/<account>/<org>/local_*.json
+
+- 同じ sessionId は「ファイル更新日時が新しい方」を正として全 org に配る（newer-wins）
+- アーカイブ状態（isArchived と archived-sessions.idx）も勝者に合わせて全 org で揃える
+- 一度同期済みのセッションがどこかの org で消えていたら、復活させない（削除はしない）
+- 変更前後を ~/.ccd-org-sync/git にコミット。`undo` で直前の同期を戻せる
+- 会話本体（~/.claude/projects）・認証情報には一切触れない
+
+使い方:
+  ccd-org-sync              同期を実行
+  ccd-org-sync --dry-run    何が変わるか表示するだけ
+  ccd-org-sync status       org ごとの件数・アーカイブ数
+  ccd-org-sync log          同期履歴
+  ccd-org-sync undo         直前の同期を元に戻す（Desktop を終了してから推奨）
+  ccd-org-sync --notify     変更があれば macOS 通知（launchd 用）
+"""
+import json, os, shutil, subprocess, sys, tempfile, time
+from pathlib import Path
+
+HOME = Path.home()
+CCS = Path(os.environ.get("CCD_SESSIONS_DIR",
+                          HOME / "Library/Application Support/Claude/claude-code-sessions"))
+BASE = Path(os.environ.get("CCD_ORG_SYNC_DIR", HOME / ".ccd-org-sync"))
+GIT = BASE / "git"
+STATE = BASE / "synced-ids.json"
+LOCK = BASE / "lock.d"
+IDX = "archived-sessions.idx"
+
+
+def log(msg):
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+
+def orgs():
+    return sorted(p for p in CCS.glob("*/*") if p.is_dir())
+
+
+def label(org):
+    return f"{org.parent.name[:8]}/{org.name[:8]}"
+
+
+def load_session(f):
+    try:
+        raw = f.read_bytes()
+        d = json.loads(raw)
+        if not isinstance(d, dict) or d.get("sessionId") != f.stem:
+            return None
+        return {"path": f, "raw": raw, "data": d, "mtime": f.stat().st_mtime}
+    except Exception as e:  # 壊れた/書き込み途中のファイルは触らない
+        log(f"WARN skip {f.name}: {e}")
+        return None
+
+
+def load_idx(org):
+    p = org / IDX
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text())
+        return d if isinstance(d, dict) and isinstance(d.get("archived"), list) else None
+    except Exception:
+        return None
+
+
+def atomic_write(path, data: bytes, mtime=None, mode=0o600):
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".ccd-org-sync-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)
+        if mtime is not None:
+            os.utime(tmp, (mtime, mtime))
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+# ---------- git snapshot ----------
+def git(*args, check=True):
+    return subprocess.run(["git", "-C", str(GIT), "-c", "core.hooksPath=/dev/null",
+                           "-c", "commit.gpgsign=false", *args],
+                          capture_output=True, text=True, check=check)
+
+
+def git_init():
+    if not (GIT / ".git").exists():
+        GIT.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(GIT)], check=True)
+        git("config", "user.name", "ccd-org-sync")
+        git("config", "user.email", "ccd-org-sync@localhost")
+
+
+def snapshot(msg):
+    """一覧ファイルと idx を git 管理下へミラーしてコミット。変化なしならスキップ。"""
+    mirror = GIT / "sessions"
+    if mirror.exists():
+        shutil.rmtree(mirror)
+    for org in orgs():
+        dst = mirror / org.parent.name / org.name
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in list(org.glob("local_*.json")) + [org / IDX]:
+            if f.is_file():
+                shutil.copy2(f, dst / f.name)
+    git("add", "-A", "sessions")
+    if git("diff", "--cached", "--quiet", check=False).returncode != 0:
+        git("commit", "-q", "-m", msg)
+        return True
+    return False
+
+
+# ---------- sync ----------
+def plan():
+    all_orgs = orgs()
+    sessions = {}  # sid -> {org: info}
+    for org in all_orgs:
+        for f in org.glob("local_*.json"):
+            info = load_session(f)
+            if info:
+                sessions.setdefault(f.stem, {})[org] = info
+    known = set(json.loads(STATE.read_text())) if STATE.exists() else set()
+
+    writes, skipped_deleted, archived = [], [], {}
+    for sid, by_org in sessions.items():
+        winner = max(by_org.values(), key=lambda i: i["mtime"])
+        archived[sid] = bool(winner["data"].get("isArchived"))
+        for org in all_orgs:
+            cur = by_org.get(org)
+            if cur is None:
+                if sid in known:  # 同期済みなのに消えている = その org で削除された
+                    skipped_deleted.append((sid, org))
+                    continue
+                writes.append(("NEW", org / f"{sid}.json", winner))
+            elif cur["raw"] != winner["raw"]:
+                writes.append(("UPD", cur["path"], winner))
+
+    idx_writes = []
+    for org in all_orgs:
+        idx = load_idx(org)
+        cur = list(idx["archived"]) if idx else []
+        new = [s for s in cur if s not in archived or archived[s]]  # 管理外の ID はそのまま残す
+        present = {s for s, by in sessions.items() if org in by} | \
+                  {w[1].stem for w in writes if w[1].parent == org}
+        for sid in sorted(present):
+            if archived.get(sid) and sid not in new:
+                new.append(sid)
+        if new != cur and (idx or new):
+            body = dict(idx or {"v": 1})
+            body["archived"] = new
+            idx_writes.append((org, body, set(new) - set(cur), set(cur) - set(new)))
+    return all_orgs, sessions, writes, idx_writes, skipped_deleted
+
+
+def sync(dry, notify):
+    if len(orgs()) < 2:
+        log("org が1つしかないので何もしません")
+        return
+    all_orgs, sessions, writes, idx_writes, skipped = plan()
+
+    for kind, path, w in writes:
+        log(f"{kind} {label(path.parent)} {path.stem[6:14]} "
+            f"[{'archived' if w['data'].get('isArchived') else 'active'}] {w['data'].get('title', '')[:30]}")
+    for org, _, add, rem in idx_writes:
+        log(f"IDX  {label(org)} アーカイブ +{len(add)} / 解除 -{len(rem)}")
+    for sid, org in skipped:
+        log(f"SKIP {label(org)} {sid[6:14]}（この org で削除済みのため復活させない）")
+    summary = f"新規 {sum(w[0] == 'NEW' for w in writes)} / 更新 {sum(w[0] == 'UPD' for w in writes)} / アーカイブ反映 {len(idx_writes)} org"
+    log(f"SUMMARY {summary}{' (dry-run)' if dry else ''}")
+    if dry:
+        return
+
+    git_init()
+    changed = bool(writes or idx_writes)
+    if changed:
+        snapshot("pre-sync: snapshot")
+        for _, path, w in writes:
+            atomic_write(path, w["raw"], mtime=w["mtime"])
+        for org, body, _, _ in idx_writes:
+            p = org / IDX
+            mt = p.stat().st_mtime if p.exists() else None
+            atomic_write(p, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(), mtime=mt)
+        snapshot(f"sync: {summary}")
+
+    # 全 org に揃った ID を「同期済み」として記録（削除検知用）
+    present_all = {sid for sid, by in sessions.items()} | {w[1].stem for w in writes}
+    in_every = {sid for sid in present_all
+                if all((o / f"{sid}.json").exists() for o in all_orgs)}
+    known = set(json.loads(STATE.read_text())) if STATE.exists() else set()
+    STATE.write_text(json.dumps(sorted(known | in_every)))
+
+    if changed and notify:
+        subprocess.run(["/usr/bin/osascript", "-e",
+                        f'display notification "{summary}（org を切り替えるか再起動で反映）" '
+                        f'with title "ccd-org-sync"'], capture_output=True)
+
+
+def status():
+    for org in orgs():
+        fs = list(org.glob("local_*.json"))
+        idx = load_idx(org)
+        print(f"{label(org)}  一覧 {len(fs):>3} 件 / アーカイブ {len(idx['archived']) if idx else 0:>3} 件")
+    if (GIT / ".git").exists():
+        print(git("log", "-1", "--format=最終同期: %ci %s").stdout.strip())
+
+
+def undo():
+    git_init()
+    out = git("log", "--format=%H %s").stdout.splitlines()
+    syncs = [l.split(" ", 1)[0] for l in out if l.split(" ", 1)[1].startswith("sync:")]
+    if not syncs:
+        sys.exit("戻せる同期がありません")
+    target = syncs[0]
+    pre = git("rev-parse", f"{target}~1").stdout.strip()
+    # pre 時点の内容を Desktop 側へ書き戻し、sync で増えたファイルは削除
+    added = git("diff", "--name-only", "--diff-filter=A", pre, target, "--", "sessions").stdout.split()
+    changed = git("diff", "--name-only", "--diff-filter=M", pre, target, "--", "sessions").stdout.split()
+    for rel in changed:
+        data = subprocess.run(["git", "-C", str(GIT), "show", f"{pre}:{rel}"],
+                              capture_output=True, check=True).stdout
+        atomic_write(CCS / Path(rel).relative_to("sessions"), data)
+        log(f"RESTORE {rel}")
+    for rel in added:
+        p = CCS / Path(rel).relative_to("sessions")
+        if p.exists():
+            p.unlink()
+            log(f"REMOVE  {rel}")
+    snapshot(f"undo: revert {target[:8]}")
+    log("完了。Claude Desktop を再起動してください")
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = next((a for a in args if not a.startswith("-")), "sync")
+    if cmd == "status":
+        return status()
+    if cmd == "log":
+        git_init()
+        return print(git("log", "--format=%ci  %s").stdout)
+    BASE.mkdir(parents=True, exist_ok=True)
+    try:
+        LOCK.mkdir()
+    except FileExistsError:
+        # 10分以上残っているロックは異常終了の残骸とみなす
+        if time.time() - LOCK.stat().st_mtime > 600:
+            LOCK.rmdir(); LOCK.mkdir()
+        else:
+            return log("別の ccd-org-sync が実行中のためスキップ")
+    try:
+        if cmd == "undo":
+            undo()
+        elif cmd == "sync":
+            sync("--dry-run" in args, "--notify" in args)
+        else:
+            sys.exit(__doc__)
+    finally:
+        LOCK.rmdir()
+
+
+if __name__ == "__main__":
+    main()
