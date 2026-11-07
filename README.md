@@ -60,7 +60,7 @@ cd ccd-org-sync
 ./install.sh --no-agent # script only, run manually
 ```
 
-The agent runs when the session folders change (at most every 20 s) and every 5 minutes, and posts a macOS notification only when something changed. Re-run `ccd-org-sync agent install` after adding an org/account to watch it immediately (the 5‑minute run picks it up anyway).
+The agent runs when the session folders change (at most every 20 s) and every 5 minutes. Re-run `ccd-org-sync agent install` after adding an org/account to watch it immediately (the 5‑minute run picks it up anyway).
 
 ## Usage
 

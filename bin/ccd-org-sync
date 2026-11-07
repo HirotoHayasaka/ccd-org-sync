@@ -15,7 +15,6 @@
   ccd-org-sync status       org ごとの件数・アーカイブ数
   ccd-org-sync log          同期履歴
   ccd-org-sync undo         直前の同期を元に戻す（Desktop を終了してから推奨）
-  ccd-org-sync --notify     変更があれば macOS 通知（launchd 用）
   ccd-org-sync agent install    自動実行（launchd）を登録。org/アカウント追加後も再実行
   ccd-org-sync agent uninstall  自動実行を解除
   ccd-org-sync agent status     自動実行の状態
@@ -233,7 +232,7 @@ def plan():
     return all_orgs, sessions, writes, idx_writes, skipped_deleted, titled
 
 
-def sync(dry, notify):
+def sync(dry):
     if len(orgs()) < 2:
         log("org が1つしかないので何もしません")
         return
@@ -271,11 +270,6 @@ def sync(dry, notify):
         now = {f.stem for f in org.glob("local_*.json")}
         seen[okey(org)] = sorted(set(seen.get(okey(org), [])) | now)
     STATE.write_text(json.dumps(seen, indent=0))
-
-    if changed and notify:
-        subprocess.run(["/usr/bin/osascript", "-e",
-                        f'display notification "{summary}（org を切り替えるか再起動で反映）" '
-                        f'with title "ccd-org-sync"'], capture_output=True)
 
 
 def status():
@@ -348,7 +342,7 @@ def agent(sub):
         with open(PLIST, "wb") as fh:
             plistlib.dump({
                 "Label": LABEL,
-                "ProgramArguments": [_self_path(), "--notify"],
+                "ProgramArguments": [_self_path()],
                 "WatchPaths": watch,
                 "StartInterval": 300,
                 "ThrottleInterval": 20,
@@ -405,7 +399,7 @@ def main():
         if cmd == "undo":
             undo()
         elif cmd == "sync":
-            sync("--dry-run" in args, "--notify" in args)
+            sync("--dry-run" in args)
         else:
             sys.exit(__doc__)
     finally:
